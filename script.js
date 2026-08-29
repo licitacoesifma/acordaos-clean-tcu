@@ -98,18 +98,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB por pedaço
         const MAX_RECORD_SIZE = 512 * 1024; // 512 KB — limite de segurança
         const YIELD_EVERY = 50000;           // yield ao navegador a cada N linhas
-        const decoder = new TextDecoder('iso-8859-1');
+        const decoder = new TextDecoder('utf-8');
         const totalSize = file.size;
         const results = [];
 
         let offset = 0;
         let leftover = '';
         let headerSkipped = false;
-        // ── Array de linhas em vez de concatenação de string ──
-        // array.push() é O(1). Concatenação de string é O(n) por operação = O(n²) total.
+        let delimiter = ',';
+        
         let currentLines = [];
         let currentLength = 0;
         let lineCount = 0;
+        let inQuotes = false;
 
         while (offset < totalSize) {
             const end = Math.min(offset + CHUNK_SIZE, totalSize);
@@ -122,51 +123,48 @@ document.addEventListener('DOMContentLoaded', () => {
             leftover = lines.pop() || '';
 
             for (let i = 0; i < lines.length; i++) {
-                if (!headerSkipped) {
-                    headerSkipped = true;
-                    continue;
+                const line = lines[i];
+                const rawLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+                
+                // Contar aspas para saber se a linha está dentro de um campo multilinha
+                let quoteCount = 0;
+                for (let j = 0; j < rawLine.length; j++) {
+                    if (rawLine[j] === '"') quoteCount++;
                 }
-
-                const rawLine = lines[i];
-                const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-                if (!line.trim()) continue;
-
-                // Acumular como array — O(1) por operação
-                currentLines.push(line);
-                currentLength += line.length + 1;
+                
+                currentLines.push(rawLine);
+                currentLength += rawLine.length + 1;
+                
+                // Se o número de aspas for ímpar, inverte o estado
+                if (quoteCount % 2 !== 0) {
+                    inQuotes = !inQuotes;
+                }
 
                 // Segurança: descartar se cresceu demais
                 if (currentLength > MAX_RECORD_SIZE) {
                     currentLines = [];
                     currentLength = 0;
+                    inQuotes = false;
                     continue;
                 }
 
-                // ── Checagem rápida no último caractere DESTA LINHA ──
-                // O TIPO sempre está no final da última linha do registro.
-                let ei = line.length - 1;
-                while (ei >= 0 && (line.charCodeAt(ei) === 34 || line.charCodeAt(ei) === 32)) ei--;
-                if (ei < 0) continue;
-                const lc = line.charCodeAt(ei);
-                if (lc !== 76 && lc !== 79 && lc !== 65) continue;
-
-                // ── Checagem de TIPO apenas nesta linha (string pequena) ──
-                const lineStripped = line.replace(/"\s*$/, '').trim();
-                const endsWithTipo = TIPOS.some(t => lineStripped.endsWith(t));
-
-                if (endsWithTipo) {
-                    // Checar se o registro começa com " (olhar só a primeira linha)
-                    const firstLine = currentLines[0];
-                    let si = 0;
-                    while (si < firstLine.length && firstLine.charCodeAt(si) <= 32) si++;
-                    if (si < firstLine.length && firstLine.charCodeAt(si) === 34) {
-                        // join() é chamado UMA VEZ por registro válido — O(n)
-                        const fullText = currentLines.join('\n');
-                        const record = parseRecord(fullText);
-                        if (record) results.push(record);
-                    }
+                // Se não estamos dentro de aspas, o registro CSV terminou!
+                if (!inQuotes) {
+                    const fullText = currentLines.join('\n');
                     currentLines = [];
                     currentLength = 0;
+
+                    if (!fullText.trim()) continue;
+
+                    if (!headerSkipped) {
+                        headerSkipped = true;
+                        // Detectar delimitador baseado no cabeçalho
+                        delimiter = fullText.includes('|') ? '|' : ',';
+                        continue;
+                    }
+
+                    const record = parseRecord(fullText, delimiter);
+                    if (record) results.push(record);
                 }
 
                 // Yield periódico para manter a UI responsiva
@@ -187,56 +185,112 @@ document.addEventListener('DOMContentLoaded', () => {
             await new Promise(resolve => setTimeout(resolve, 0));
         }
 
-        // Processar texto que sobrou no final do arquivo
-        if (leftover.trim()) {
-            const line = leftover.endsWith('\r') ? leftover.slice(0, -1) : leftover;
-            if (line.trim()) {
-                currentLines.push(line);
+        // Processar resto
+        if (leftover.trim() || currentLines.length > 0) {
+            const rawLine = leftover.endsWith('\r') ? leftover.slice(0, -1) : leftover;
+            if (rawLine.trim()) currentLines.push(rawLine);
+            
+            if (currentLines.length > 0) {
+                const fullText = currentLines.join('\n');
+                if (!headerSkipped) {
+                    delimiter = fullText.includes('|') ? '|' : ',';
+                } else {
+                    const record = parseRecord(fullText, delimiter);
+                    if (record) results.push(record);
+                }
             }
-        }
-        if (currentLines.length > 0) {
-            const fullText = currentLines.join('\n');
-            const record = parseRecord(fullText);
-            if (record) results.push(record);
         }
 
         return results;
     }
 
-    function parseRecord(text) {
-        // Remover tags HTML
-        let clean = text.replace(/<[^>]+>/g, '');
-        // Normalizar espaços
-        clean = clean.replace(/\s+/g, ' ').trim();
-
-        // Localizar campo fixo "Licitação"
-        const idx = clean.search(/,\s*"Licitação",/);
-        if (idx === -1) return null;
-
-        const enunciado = clean.substring(0, idx).trim().replace(/^"|"$/g, '').trim();
-        const remaining = clean.substring(idx + 1);
-
-        // Extrair campos entre aspas
-        const regex = /"([^"]*)"/g;
-        const campos = [];
-        let m;
-        while ((m = regex.exec(remaining)) !== null) {
-            campos.push(m[1]);
+    // Parseador manual para respeitar aspas ao dividir por delimitador
+    function parseCSVLine(text, delimiter) {
+        const fields = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            if (char === '"') {
+                inQuotes = !inQuotes;
+                // Mantemos as aspas por enquanto, vamos limpar depois
+                current += char; 
+            } else if (char === delimiter && !inQuotes) {
+                fields.push(current);
+                current = '';
+            } else {
+                current += char;
+            }
         }
+        fields.push(current);
+        return fields;
+    }
 
-        if (campos.length >= 9) {
-            const acordao = campos[4].trim();
+    function parseRecord(text, delimiter) {
+        const clean = text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        
+        if (delimiter === '|') {
+            // --- NOVO FORMATO (2025) ---
+            const campos = parseCSVLine(clean, '|');
+            
+            // Limpar aspas das extremidades
+            for (let i = 0; i < campos.length; i++) {
+                campos[i] = campos[i].replace(/^"|"$/g, '').trim();
+            }
+
+            if (campos.length < 20) return null;
+
+            const tipoProcesso = (campos[12] || '').toUpperCase();
+            const titulo = (campos[2] || '').toUpperCase();
+            
+            // Filtrar apenas se corresponder aos tipos desejados
+            const isTargetType = TIPOS.some(t => tipoProcesso.includes(t) || titulo.includes(t));
+            if (!isTargetType) return null;
+
             return {
-                acordao,
-                data: campos[3].trim(),
-                colegiado: extrairColegiado(acordao),
-                autor: toTitleCase(campos[5].trim()),
-                tipo_processo: toTitleCase(campos[8].trim()),
-                subtema: campos[2].trim(),
-                indexadores: campos[7].trim(),
-                legislacao: campos[6].trim(),
-                enunciado
+                acordao: campos[3] || '',
+                data: campos[7] || '',
+                colegiado: campos[6] || '',
+                autor: toTitleCase(campos[8] || ''),
+                tipo_processo: toTitleCase(campos[12] || ''),
+                subtema: '', 
+                indexadores: '', 
+                legislacao: '', 
+                enunciado: campos[21] || campos[23] || ''
             };
+        } else {
+            // --- FORMATO ANTIGO ---
+            const idx = clean.search(/,\s*"Licitação",/);
+            if (idx === -1) return null;
+
+            const enunciado = clean.substring(0, idx).trim().replace(/^"|"$/g, '').trim();
+            const remaining = clean.substring(idx + 1);
+
+            const regex = /"([^"]*)"/g;
+            const campos = [];
+            let m;
+            while ((m = regex.exec(remaining)) !== null) {
+                campos.push(m[1]);
+            }
+
+            if (campos.length >= 9) {
+                const acordao = campos[4].trim();
+                const tipo_proc = campos[8].trim().toUpperCase();
+                const isTargetType = TIPOS.some(t => tipo_proc.includes(t));
+                if (!isTargetType) return null;
+
+                return {
+                    acordao,
+                    data: campos[3].trim(),
+                    colegiado: extrairColegiado(acordao),
+                    autor: toTitleCase(campos[5].trim()),
+                    tipo_processo: toTitleCase(campos[8].trim()),
+                    subtema: campos[2].trim(),
+                    indexadores: campos[7].trim(),
+                    legislacao: campos[6].trim(),
+                    enunciado
+                };
+            }
         }
         return null;
     }
@@ -270,13 +324,16 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadSection.classList.remove('hidden');
     });
 
-    // --- Export Generators ---
-    function generateMarkdownParts() {
+    // --- Export Generators Assíncronos ---
+    // Processamos a geração de arquivos em blocos (chunks) para não travar a UI
+    
+    async function generateMarkdownPartsAsync() {
         const titulo = `Jurisprudência TCU — ${originalFilename}`;
         const parts = [];
         parts.push(`# ${titulo}\n\n> Total de acórdãos: ${parsedRecords.length}\n\n---\n\n`);
 
-        for (const r of parsedRecords) {
+        for (let i = 0; i < parsedRecords.length; i++) {
+            const r = parsedRecords[i];
             parts.push(`## ${r.acordao} — ${r.colegiado}\n`);
             parts.push(`**Data:** ${r.data}  \n`);
             parts.push(`**Relator:** ${r.autor}  \n`);
@@ -286,14 +343,46 @@ document.addEventListener('DOMContentLoaded', () => {
             if (r.legislacao) parts.push(`**Legislação:** ${r.legislacao}  \n`);
             parts.push(`\n**Enunciado:**  \n${r.enunciado}\n`);
             parts.push(`\n---\n\n`);
+
+            // Liberar o controle para o navegador a cada 2.000 registros
+            if (i % 2000 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
         }
 
         return parts;
     }
 
+    async function generateJSONPartsAsync() {
+        const parts = ['[\n'];
+        
+        for (let i = 0; i < parsedRecords.length; i++) {
+            const r = parsedRecords[i];
+            // Serializar apenas um objeto por vez
+            let str = JSON.stringify(r, null, 2);
+            // Adicionar indentação extra para ficar bonito dentro do array
+            str = str.split('\n').map(line => '  ' + line).join('\n');
+            
+            // Adicionar vírgula se não for o último
+            if (i < parsedRecords.length - 1) {
+                str += ',\n';
+            } else {
+                str += '\n';
+            }
+            
+            parts.push(str);
+
+            // Liberar o controle para o navegador a cada 2.000 registros
+            if (i % 2000 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
+        
+        parts.push(']');
+        return parts;
+    }
+
     function downloadFile(contentArray, filename, type) {
-        // O Blob aceita um array de strings. Passar o array direto evita
-        // criar uma única string gigantesca na memória com join().
         const blob = new Blob(contentArray, { type: type });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -305,47 +394,41 @@ document.addEventListener('DOMContentLoaded', () => {
         URL.revokeObjectURL(url);
     }
 
-    btnDownloadMd.addEventListener('click', () => {
+    btnDownloadMd.addEventListener('click', async () => {
         if (parsedRecords.length === 0) return;
         
         const originalText = btnDownloadMd.innerHTML;
-        btnDownloadMd.innerHTML = '⏳ Gerando arquivo...';
+        btnDownloadMd.innerHTML = '⏳ Gerando arquivo Markdown...';
         btnDownloadMd.disabled = true;
 
-        // setTimeout para permitir que a UI atualize o texto do botão
-        setTimeout(() => {
-            try {
-                const parts = generateMarkdownParts();
-                downloadFile(parts, `${originalFilename}.md`, 'text/markdown;charset=utf-8');
-            } catch (err) {
-                console.error(err);
-                alert('Erro ao gerar o arquivo Markdown.');
-            } finally {
-                btnDownloadMd.innerHTML = originalText;
-                btnDownloadMd.disabled = false;
-            }
-        }, 50);
+        try {
+            const parts = await generateMarkdownPartsAsync();
+            downloadFile(parts, `${originalFilename}.md`, 'text/markdown;charset=utf-8');
+        } catch (err) {
+            console.error(err);
+            alert('Erro ao gerar o arquivo Markdown.');
+        } finally {
+            btnDownloadMd.innerHTML = originalText;
+            btnDownloadMd.disabled = false;
+        }
     });
 
-    btnDownloadJson.addEventListener('click', () => {
+    btnDownloadJson.addEventListener('click', async () => {
         if (parsedRecords.length === 0) return;
         
         const originalText = btnDownloadJson.innerHTML;
-        btnDownloadJson.innerHTML = '⏳ Gerando arquivo...';
+        btnDownloadJson.innerHTML = '⏳ Gerando arquivo JSON...';
         btnDownloadJson.disabled = true;
 
-        setTimeout(() => {
-            try {
-                // JSON stringify pode demorar e travar brevemente para objetos gigantes
-                const jsonString = JSON.stringify(parsedRecords, null, 2);
-                downloadFile([jsonString], `${originalFilename}.json`, 'application/json;charset=utf-8');
-            } catch (err) {
-                console.error(err);
-                alert('Erro ao gerar o arquivo JSON.');
-            } finally {
-                btnDownloadJson.innerHTML = originalText;
-                btnDownloadJson.disabled = false;
-            }
-        }, 50);
+        try {
+            const parts = await generateJSONPartsAsync();
+            downloadFile(parts, `${originalFilename}.json`, 'application/json;charset=utf-8');
+        } catch (err) {
+            console.error(err);
+            alert('Erro ao gerar o arquivo JSON.');
+        } finally {
+            btnDownloadJson.innerHTML = originalText;
+            btnDownloadJson.disabled = false;
+        }
     });
 });
