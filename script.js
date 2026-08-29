@@ -253,16 +253,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 colegiado: campos[6] || '',
                 autor: toTitleCase(campos[8] || ''),
                 tipo_processo: toTitleCase(campos[12] || ''),
+                area: '',
+                tema: '',
                 subtema: '', 
                 indexadores: '', 
                 legislacao: '', 
-                enunciado: campos[21] || campos[23] || ''
+                enunciado: campos[21] || campos[22] || 'Sem enunciado',
+                decisao: campos[24] || campos[23] || '',
+                relatorio: campos[28] || '',
+                voto: campos[29] || ''
             };
         } else {
             // --- FORMATO ANTIGO ---
-            const idx = clean.search(/,\s*"Licitação",/);
-            if (idx === -1) return null;
-
+            const match = clean.match(/,\s*"[^"]+",\s*"[^"]+",\s*"[^"]+",\s*"\d{2}\/\d{2}\/\d{4}",/);
+            if (!match) return null;
+            
+            const idx = match.index;
             const enunciado = clean.substring(0, idx).trim().replace(/^"|"$/g, '').trim();
             const remaining = clean.substring(idx + 1);
 
@@ -285,10 +291,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     colegiado: extrairColegiado(acordao),
                     autor: toTitleCase(campos[5].trim()),
                     tipo_processo: toTitleCase(campos[8].trim()),
+                    area: campos[0].trim(),
+                    tema: campos[1].trim(),
                     subtema: campos[2].trim(),
                     indexadores: campos[7].trim(),
                     legislacao: campos[6].trim(),
-                    enunciado
+                    enunciado,
+                    decisao: '',
+                    relatorio: '',
+                    voto: ''
                 };
             }
         }
@@ -334,14 +345,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
         for (let i = 0; i < parsedRecords.length; i++) {
             const r = parsedRecords[i];
-            parts.push(`## ${r.acordao} — ${r.colegiado}\n`);
+            parts.push(`## Acórdão ${r.acordao} — ${r.colegiado}\n`);
+            parts.push(`**Enunciado:** \n${r.enunciado}\n\n`);
+            parts.push(`**Área:** ${r.area || 'Não informado'}  \n`);
+            parts.push(`**Tema:** ${r.tema || 'Não informado'}  \n`);
+            parts.push(`**Subtema:** ${r.subtema || 'Não informado'}  \n`);
             parts.push(`**Data:** ${r.data}  \n`);
-            parts.push(`**Relator:** ${r.autor}  \n`);
-            parts.push(`**Tipo de processo:** ${r.tipo_processo}  \n`);
-            if (r.subtema) parts.push(`**Subtema:** ${r.subtema}  \n`);
-            if (r.indexadores) parts.push(`**Indexadores:** ${r.indexadores}  \n`);
-            if (r.legislacao) parts.push(`**Legislação:** ${r.legislacao}  \n`);
-            parts.push(`\n**Enunciado:**  \n${r.enunciado}\n`);
+            parts.push(`**Acórdão:** ${r.acordao} — ${r.colegiado}  \n`);
+            parts.push(`**Autor da tese:** ${r.autor}  \n`);
+            parts.push(`**Legislação:** ${r.legislacao || 'Não informado'}  \n`);
+            parts.push(`**Tipo do processo:** ${r.tipo_processo}  \n`);
+            if (r.decisao) {
+                parts.push(`\n**Decisão:**  \n${r.decisao}\n`);
+            }
+            if (r.relatorio) {
+                parts.push(`\n**Relatório:**  \n${r.relatorio}\n`);
+            }
+            if (r.voto) {
+                parts.push(`\n**Voto:**  \n${r.voto}\n`);
+            }
             parts.push(`\n---\n\n`);
 
             // Liberar o controle para o navegador a cada 2.000 registros
