@@ -243,3 +243,55 @@ input[type="file"] {
     color: var(--text-primary);
     text-decoration: underline;
 }
+
+/* Progress section */
+.progress-section {
+    opacity: 1;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+.progress-section.hidden {
+    display: none;
+    opacity: 0;
+    transform: translateY(20px);
+}
+
+.progress-header {
+    margin-bottom: 1.5rem;
+}
+
+.progress-header h2 {
+    color: #818cf8;
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.progress-header p {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+}
+
+.progress-track {
+    width: 100%;
+    height: 12px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid var(--surface-border);
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #818cf8, #c084fc, #818cf8);
+    background-size: 200% 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+    animation: shimmer 2s linear infinite;
+    box-shadow: 0 0 12px rgba(129, 140, 248, 0.5);
+}
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
