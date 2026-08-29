@@ -95,9 +95,9 @@ document.addEventListener('DOMContentLoaded', () => {
     ];
 
     async function processFile(file) {
-        const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB por pedaço
+        const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB por pedaço
         const MAX_RECORD_SIZE = 512 * 1024; // 512 KB — limite de segurança
-        const YIELD_EVERY = 100000;          // yield ao navegador a cada N linhas
+        const YIELD_EVERY = 50000;           // yield ao navegador a cada N linhas
         const decoder = new TextDecoder('iso-8859-1');
         const totalSize = file.size;
         const results = [];
@@ -105,7 +105,10 @@ document.addEventListener('DOMContentLoaded', () => {
         let offset = 0;
         let leftover = '';
         let headerSkipped = false;
-        let current = '';
+        // ── Array de linhas em vez de concatenação de string ──
+        // array.push() é O(1). Concatenação de string é O(n) por operação = O(n²) total.
+        let currentLines = [];
+        let currentLength = 0;
         let lineCount = 0;
 
         while (offset < totalSize) {
@@ -116,55 +119,57 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const text = leftover + chunkText;
             const lines = text.split('\n');
-            // A última "linha" pode estar incompleta (cortada no meio)
             leftover = lines.pop() || '';
 
-            for (const rawLine of lines) {
-                // Pular o cabeçalho (primeira linha do CSV)
+            for (let i = 0; i < lines.length; i++) {
                 if (!headerSkipped) {
                     headerSkipped = true;
                     continue;
                 }
 
+                const rawLine = lines[i];
                 const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
                 if (!line.trim()) continue;
 
-                // Acumular linhas (registros podem ter quebras de linha internas)
-                current = current ? (current + '\n' + line) : line;
+                // Acumular como array — O(1) por operação
+                currentLines.push(line);
+                currentLength += line.length + 1;
 
-                // ── Segurança: se current cresceu demais, não é um registro válido ──
-                // Nenhum acórdão legítimo tem 512KB. Descartamos e recomeçamos.
-                if (current.length > MAX_RECORD_SIZE) {
-                    current = '';
+                // Segurança: descartar se cresceu demais
+                if (currentLength > MAX_RECORD_SIZE) {
+                    currentLines = [];
+                    currentLength = 0;
                     continue;
                 }
 
-                // ── Otimização: checagem rápida pelo último caractere ──
+                // ── Checagem rápida no último caractere DESTA LINHA ──
+                // O TIPO sempre está no final da última linha do registro.
                 let ei = line.length - 1;
                 while (ei >= 0 && (line.charCodeAt(ei) === 34 || line.charCodeAt(ei) === 32)) ei--;
                 if (ei < 0) continue;
-                const lastCharCode = line.charCodeAt(ei);
-                // L=76, O=79, A=65
-                if (lastCharCode !== 76 && lastCharCode !== 79 && lastCharCode !== 65) continue;
+                const lc = line.charCodeAt(ei);
+                if (lc !== 76 && lc !== 79 && lc !== 65) continue;
 
-                // ── Checagem de TIPO: olhar APENAS os últimos ~60 chars ──
-                // Evita criar cópia de megabytes de "current" a cada linha.
-                const tail = current.length > 60 ? current.slice(-60) : current;
-                const tailStripped = tail.replace(/"\s*$/, '').trim();
-                const endsWithTipo = TIPOS.some(t => tailStripped.endsWith(t));
+                // ── Checagem de TIPO apenas nesta linha (string pequena) ──
+                const lineStripped = line.replace(/"\s*$/, '').trim();
+                const endsWithTipo = TIPOS.some(t => lineStripped.endsWith(t));
 
                 if (endsWithTipo) {
-                    // Checar se current começa com " sem criar cópia da string
+                    // Checar se o registro começa com " (olhar só a primeira linha)
+                    const firstLine = currentLines[0];
                     let si = 0;
-                    while (si < current.length && current.charCodeAt(si) <= 32) si++;
-                    if (si < current.length && current.charCodeAt(si) === 34) {
-                        const record = parseRecord(current);
+                    while (si < firstLine.length && firstLine.charCodeAt(si) <= 32) si++;
+                    if (si < firstLine.length && firstLine.charCodeAt(si) === 34) {
+                        // join() é chamado UMA VEZ por registro válido — O(n)
+                        const fullText = currentLines.join('\n');
+                        const record = parseRecord(fullText);
                         if (record) results.push(record);
-                        current = '';
                     }
+                    currentLines = [];
+                    currentLength = 0;
                 }
 
-                // ── Yield periódico para manter a UI responsiva ──
+                // Yield periódico para manter a UI responsiva
                 lineCount++;
                 if (lineCount % YIELD_EVERY === 0) {
                     const pct = Math.min(Math.floor((offset / totalSize) * 100), 99);
@@ -176,7 +181,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             offset = end;
 
-            // Atualizar progresso e devolver controle ao navegador
             const pct = Math.min(Math.floor((offset / totalSize) * 100), 100);
             progressBar.style.width = pct + '%';
             progressText.textContent = `Processando... ${pct}% — ${results.length.toLocaleString('pt-BR')} acórdãos encontrados`;
@@ -187,11 +191,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (leftover.trim()) {
             const line = leftover.endsWith('\r') ? leftover.slice(0, -1) : leftover;
             if (line.trim()) {
-                current = current ? (current + '\n' + line) : line;
+                currentLines.push(line);
             }
         }
-        if (current.trim()) {
-            const record = parseRecord(current);
+        if (currentLines.length > 0) {
+            const fullText = currentLines.join('\n');
+            const record = parseRecord(fullText);
             if (record) results.push(record);
         }
 
