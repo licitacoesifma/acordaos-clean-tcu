@@ -271,7 +271,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // --- Export Generators ---
-    function generateMarkdown() {
+    function generateMarkdownParts() {
         const titulo = `Jurisprudência TCU — ${originalFilename}`;
         const parts = [];
         parts.push(`# ${titulo}\n\n> Total de acórdãos: ${parsedRecords.length}\n\n---\n\n`);
@@ -288,15 +288,13 @@ document.addEventListener('DOMContentLoaded', () => {
             parts.push(`\n---\n\n`);
         }
 
-        return parts.join('');
+        return parts;
     }
 
-    function generateJSON() {
-        return JSON.stringify(parsedRecords, null, 2);
-    }
-
-    function downloadFile(content, filename, type) {
-        const blob = new Blob([content], { type: type });
+    function downloadFile(contentArray, filename, type) {
+        // O Blob aceita um array de strings. Passar o array direto evita
+        // criar uma única string gigantesca na memória com join().
+        const blob = new Blob(contentArray, { type: type });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -309,13 +307,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
     btnDownloadMd.addEventListener('click', () => {
         if (parsedRecords.length === 0) return;
-        const md = generateMarkdown();
-        downloadFile(md, `${originalFilename}.md`, 'text/markdown;charset=utf-8');
+        
+        const originalText = btnDownloadMd.innerHTML;
+        btnDownloadMd.innerHTML = '⏳ Gerando arquivo...';
+        btnDownloadMd.disabled = true;
+
+        // setTimeout para permitir que a UI atualize o texto do botão
+        setTimeout(() => {
+            try {
+                const parts = generateMarkdownParts();
+                downloadFile(parts, `${originalFilename}.md`, 'text/markdown;charset=utf-8');
+            } catch (err) {
+                console.error(err);
+                alert('Erro ao gerar o arquivo Markdown.');
+            } finally {
+                btnDownloadMd.innerHTML = originalText;
+                btnDownloadMd.disabled = false;
+            }
+        }, 50);
     });
 
     btnDownloadJson.addEventListener('click', () => {
         if (parsedRecords.length === 0) return;
-        const json = generateJSON();
-        downloadFile(json, `${originalFilename}.json`, 'application/json;charset=utf-8');
+        
+        const originalText = btnDownloadJson.innerHTML;
+        btnDownloadJson.innerHTML = '⏳ Gerando arquivo...';
+        btnDownloadJson.disabled = true;
+
+        setTimeout(() => {
+            try {
+                // JSON stringify pode demorar e travar brevemente para objetos gigantes
+                const jsonString = JSON.stringify(parsedRecords, null, 2);
+                downloadFile([jsonString], `${originalFilename}.json`, 'application/json;charset=utf-8');
+            } catch (err) {
+                console.error(err);
+                alert('Erro ao gerar o arquivo JSON.');
+            } finally {
+                btnDownloadJson.innerHTML = originalText;
+                btnDownloadJson.disabled = false;
+            }
+        }, 50);
     });
 });
