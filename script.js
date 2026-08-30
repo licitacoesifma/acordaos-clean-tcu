@@ -248,20 +248,19 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!isTargetType) return null;
 
             return {
-                acordao: campos[3] || '',
-                data: campos[7] || '',
+                key: campos[0] || '',
+                tipo: campos[1] || '',
+                titulo: campos[2] || '',
+                numacordao: campos[3] || '',
+                anoacordao: campos[4] || '',
                 colegiado: campos[6] || '',
-                autor: toTitleCase(campos[8] || ''),
-                tipo_processo: toTitleCase(campos[12] || ''),
-                area: '',
-                tema: '',
-                subtema: '', 
-                indexadores: '', 
-                legislacao: '', 
-                enunciado: campos[21] || campos[22] || 'Sem enunciado',
-                decisao: campos[24] || campos[23] || '',
-                relatorio: campos[28] || '',
-                voto: campos[29] || ''
+                relator: toTitleCase(campos[8] || ''),
+                acordaosrelacionados: campos[11] || '',
+                tipoprocesso: toTitleCase(campos[12] || ''),
+                entidade: campos[14] || '',
+                assunto: campos[21] || '',
+                sumario: campos[22] || '',
+                acordao: campos[23] || ''
             };
         } else {
             // --- FORMATO ANTIGO ---
@@ -286,20 +285,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!isTargetType) return null;
 
                 return {
-                    acordao,
-                    data: campos[3].trim(),
+                    key: '',
+                    tipo: '',
+                    titulo: '',
+                    numacordao: acordao,
+                    anoacordao: '',
                     colegiado: extrairColegiado(acordao),
-                    autor: toTitleCase(campos[5].trim()),
-                    tipo_processo: toTitleCase(campos[8].trim()),
-                    area: campos[0].trim(),
-                    tema: campos[1].trim(),
-                    subtema: campos[2].trim(),
-                    indexadores: campos[7].trim(),
-                    legislacao: campos[6].trim(),
-                    enunciado,
-                    decisao: '',
-                    relatorio: '',
-                    voto: ''
+                    relator: toTitleCase(campos[5].trim()),
+                    acordaosrelacionados: '',
+                    tipoprocesso: toTitleCase(campos[8].trim()),
+                    entidade: '',
+                    assunto: campos[2].trim(),
+                    sumario: enunciado,
+                    acordao: ''
                 };
             }
         }
@@ -345,24 +343,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         for (let i = 0; i < parsedRecords.length; i++) {
             const r = parsedRecords[i];
-            parts.push(`## Acórdão ${r.acordao} — ${r.colegiado}\n`);
-            parts.push(`**Enunciado:** \n${r.enunciado}\n\n`);
-            parts.push(`**Área:** ${r.area || 'Não informado'}  \n`);
-            parts.push(`**Tema:** ${r.tema || 'Não informado'}  \n`);
-            parts.push(`**Subtema:** ${r.subtema || 'Não informado'}  \n`);
-            parts.push(`**Data:** ${r.data}  \n`);
-            parts.push(`**Acórdão:** ${r.acordao} — ${r.colegiado}  \n`);
-            parts.push(`**Autor da tese:** ${r.autor}  \n`);
-            parts.push(`**Legislação:** ${r.legislacao || 'Não informado'}  \n`);
-            parts.push(`**Tipo do processo:** ${r.tipo_processo}  \n`);
-            if (r.decisao) {
-                parts.push(`\n**Decisão:**  \n${r.decisao}\n`);
-            }
-            if (r.relatorio) {
-                parts.push(`\n**Relatório:**  \n${r.relatorio}\n`);
-            }
-            if (r.voto) {
-                parts.push(`\n**Voto:**  \n${r.voto}\n`);
+            parts.push(`## ${r.titulo || 'Acórdão'}\n`);
+            parts.push(`**Chave (KEY):** ${r.key || 'Não informado'}  \n`);
+            parts.push(`**Tipo:** ${r.tipo || 'Não informado'}  \n`);
+            parts.push(`**Título:** ${r.titulo || 'Não informado'}  \n`);
+            parts.push(`**Número do Acórdão:** ${r.numacordao || 'Não informado'}  \n`);
+            parts.push(`**Ano:** ${r.anoacordao || 'Não informado'}  \n`);
+            parts.push(`**Colegiado:** ${r.colegiado || 'Não informado'}  \n`);
+            parts.push(`**Relator:** ${r.relator || 'Não informado'}  \n`);
+            parts.push(`**Acórdãos Relacionados:** ${r.acordaosrelacionados || 'Não informado'}  \n`);
+            parts.push(`**Tipo de Processo:** ${r.tipoprocesso || 'Não informado'}  \n`);
+            parts.push(`**Entidade:** ${r.entidade || 'Não informado'}  \n`);
+            parts.push(`**Assunto:** ${r.assunto || 'Não informado'}  \n`);
+            parts.push(`**Sumário:** ${r.sumario || 'Não informado'}  \n`);
+            if (r.acordao) {
+                parts.push(`\n**Acórdão (Decisão):**  \n${r.acordao}\n`);
             }
             parts.push(`\n---\n\n`);
 
