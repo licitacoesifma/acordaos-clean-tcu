@@ -80,19 +80,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── Parser assíncrono com leitura em chunks ─────────────────────────────
     //
-    // Lê o arquivo em pedaços de 8 MB usando file.slice() + arrayBuffer().
+    // Lê o arquivo em pedaços de 4 MB usando file.slice() + arrayBuffer().
     // Entre cada pedaço, libera o controle para o navegador com setTimeout(0)
     // para que a barra de progresso atualize e a tela nunca congele.
     //
-    // Otimização: antes de rodar o regex pesado para verificar TIPO,
-    // faz uma checagem rápida pelo último caractere da linha (L, O ou A),
-    // eliminando 95%+ das linhas sem custo.
+    // Suporta 3 formatos de CSV do TCU:
+    //   1) Bruto 2025: pipe "|", 24+ colunas
+    //   2) Pré-processado: ";" ou ",", 13 colunas com cabeçalho padrão
+    //   3) Antigo (Jurisprudência Selecionada): vírgula, formato livre
     // ─────────────────────────────────────────────────────────────────────────
 
     const TIPOS = [
         'TOMADA DE CONTAS ESPECIAL', 'REPRESENTAÇÃO', 'DENÚNCIA',
         'AUDITORIA', 'MONITORAMENTO', 'CONSULTA', 'RECURSO', 'LEVANTAMENTO'
     ];
+
+    // Nomes de colunas padrão do TCU para detecção de formato pré-processado
+    const STANDARD_HEADER_KEYS = ['KEY', 'NUMACORDAO', 'TIPOPROCESSO', 'ACORDAO'];
 
     async function processFile(file) {
         const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB por pedaço
@@ -106,7 +110,9 @@ document.addEventListener('DOMContentLoaded', () => {
         let leftover = '';
         let headerSkipped = false;
         let delimiter = ',';
-        
+        let formatType = 'unknown'; // 'standard', 'raw_pipe', 'legacy_comma'
+        let headerMap = {};         // mapeamento nome_coluna → índice
+
         let currentLines = [];
         let currentLength = 0;
         let lineCount = 0;
@@ -125,16 +131,16 @@ document.addEventListener('DOMContentLoaded', () => {
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 const rawLine = line.endsWith('\r') ? line.slice(0, -1) : line;
-                
+
                 // Contar aspas para saber se a linha está dentro de um campo multilinha
                 let quoteCount = 0;
                 for (let j = 0; j < rawLine.length; j++) {
                     if (rawLine[j] === '"') quoteCount++;
                 }
-                
+
                 currentLines.push(rawLine);
                 currentLength += rawLine.length + 1;
-                
+
                 // Se o número de aspas for ímpar, inverte o estado
                 if (quoteCount % 2 !== 0) {
                     inQuotes = !inQuotes;
@@ -158,12 +164,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     if (!headerSkipped) {
                         headerSkipped = true;
-                        // Detectar delimitador baseado no cabeçalho
-                        delimiter = fullText.includes('|') ? '|' : ',';
+                        // Detectar delimitador e formato baseado no cabeçalho
+                        const detected = detectFormat(fullText);
+                        delimiter = detected.delimiter;
+                        formatType = detected.formatType;
+                        headerMap = detected.headerMap;
                         continue;
                     }
 
-                    const record = parseRecord(fullText, delimiter);
+                    const record = parseRecord(fullText, delimiter, formatType, headerMap);
                     if (record) results.push(record);
                 }
 
@@ -189,19 +198,59 @@ document.addEventListener('DOMContentLoaded', () => {
         if (leftover.trim() || currentLines.length > 0) {
             const rawLine = leftover.endsWith('\r') ? leftover.slice(0, -1) : leftover;
             if (rawLine.trim()) currentLines.push(rawLine);
-            
+
             if (currentLines.length > 0) {
                 const fullText = currentLines.join('\n');
                 if (!headerSkipped) {
-                    delimiter = fullText.includes('|') ? '|' : ',';
+                    const detected = detectFormat(fullText);
+                    delimiter = detected.delimiter;
+                    formatType = detected.formatType;
+                    headerMap = detected.headerMap;
                 } else {
-                    const record = parseRecord(fullText, delimiter);
+                    const record = parseRecord(fullText, delimiter, formatType, headerMap);
                     if (record) results.push(record);
                 }
             }
         }
 
         return results;
+    }
+
+    /**
+     * Detecta o formato do CSV baseado no cabeçalho.
+     * Retorna { delimiter, formatType, headerMap }.
+     */
+    function detectFormat(headerLine) {
+        // Prioridade: | > ; > ,
+        let delimiter;
+        if (headerLine.includes('|')) {
+            delimiter = '|';
+        } else if (headerLine.includes(';')) {
+            delimiter = ';';
+        } else {
+            delimiter = ',';
+        }
+
+        // Verificar se é formato padrão (cabeçalho com nomes de colunas conhecidos)
+        const headerUpper = headerLine.toUpperCase();
+        const hasStandard = STANDARD_HEADER_KEYS.every(k => headerUpper.includes(k));
+
+        let formatType = 'legacy_comma';
+        let headerMap = {};
+
+        if (hasStandard) {
+            formatType = 'standard';
+            // Construir mapa de colunas pelo cabeçalho
+            const cols = parseCSVLine(headerLine, delimiter);
+            for (let i = 0; i < cols.length; i++) {
+                const name = cols[i].replace(/^"|"$/g, '').trim().toUpperCase();
+                headerMap[name] = i;
+            }
+        } else if (delimiter === '|') {
+            formatType = 'raw_pipe';
+        }
+
+        return { delimiter, formatType, headerMap };
     }
 
     // Parseador manual para respeitar aspas ao dividir por delimitador
@@ -214,7 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (char === '"') {
                 inQuotes = !inQuotes;
                 // Mantemos as aspas por enquanto, vamos limpar depois
-                current += char; 
+                current += char;
             } else if (char === delimiter && !inQuotes) {
                 fields.push(current);
                 current = '';
@@ -226,13 +275,56 @@ document.addEventListener('DOMContentLoaded', () => {
         return fields;
     }
 
-    function parseRecord(text, delimiter) {
+    function cleanField(val) {
+        return (val || '').replace(/^"|"$/g, '').trim();
+    }
+
+    function cleanHtml(text) {
+        return (text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function parseRecord(text, delimiter, formatType, headerMap) {
         const clean = text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-        
-        if (delimiter === '|') {
-            // --- NOVO FORMATO (2025) ---
+
+        // ─── FORMATO PRÉ-PROCESSADO (cabeçalho padrão com 13 colunas) ─────
+        if (formatType === 'standard') {
+            const campos = parseCSVLine(clean, delimiter);
+
+            // Função helper para pegar coluna pelo nome
+            const col = (name) => {
+                const idx = headerMap[name];
+                return idx !== undefined && idx < campos.length
+                    ? cleanField(campos[idx])
+                    : '';
+            };
+
+            const tipoProcesso = col('TIPOPROCESSO').toUpperCase();
+            const titulo = col('TITULO').toUpperCase();
+
+            const isTargetType = TIPOS.some(t => tipoProcesso.includes(t) || titulo.includes(t));
+            if (!isTargetType) return null;
+
+            return {
+                key: col('KEY'),
+                tipo: col('TIPO'),
+                titulo: col('TITULO'),
+                numacordao: col('NUMACORDAO'),
+                anoacordao: col('ANOACORDAO'),
+                colegiado: col('COLEGIADO'),
+                relator: toTitleCase(col('RELATOR')),
+                acordaosrelacionados: col('ACORDAOSRELACIONADOS'),
+                tipoprocesso: toTitleCase(col('TIPOPROCESSO')),
+                entidade: col('ENTIDADE'),
+                assunto: cleanHtml(col('ASSUNTO')),
+                sumario: cleanHtml(col('SUMARIO')),
+                acordao: cleanHtml(col('ACORDAO'))
+            };
+        }
+
+        // ─── FORMATO BRUTO 2025 (pipe "|", 24+ colunas) ───────────────────
+        if (formatType === 'raw_pipe') {
             const campos = parseCSVLine(clean, '|');
-            
+
             // Limpar aspas das extremidades
             for (let i = 0; i < campos.length; i++) {
                 campos[i] = campos[i].replace(/^"|"$/g, '').trim();
@@ -242,7 +334,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const tipoProcesso = (campos[12] || '').toUpperCase();
             const titulo = (campos[2] || '').toUpperCase();
-            
+
             // Filtrar apenas se corresponder aos tipos desejados
             const isTargetType = TIPOS.some(t => tipoProcesso.includes(t) || titulo.includes(t));
             if (!isTargetType) return null;
@@ -262,45 +354,46 @@ document.addEventListener('DOMContentLoaded', () => {
                 sumario: campos[22] || '',
                 acordao: campos[23] || ''
             };
-        } else {
-            // --- FORMATO ANTIGO ---
-            const match = clean.match(/,\s*"[^"]+",\s*"[^"]+",\s*"[^"]+",\s*"\d{2}\/\d{2}\/\d{4}",/);
-            if (!match) return null;
-            
-            const idx = match.index;
-            const enunciado = clean.substring(0, idx).trim().replace(/^"|"$/g, '').trim();
-            const remaining = clean.substring(idx + 1);
-
-            const regex = /"([^"]*)"/g;
-            const campos = [];
-            let m;
-            while ((m = regex.exec(remaining)) !== null) {
-                campos.push(m[1]);
-            }
-
-            if (campos.length >= 9) {
-                const acordao = campos[4].trim();
-                const tipo_proc = campos[8].trim().toUpperCase();
-                const isTargetType = TIPOS.some(t => tipo_proc.includes(t));
-                if (!isTargetType) return null;
-
-                return {
-                    key: '',
-                    tipo: '',
-                    titulo: '',
-                    numacordao: acordao,
-                    anoacordao: '',
-                    colegiado: extrairColegiado(acordao),
-                    relator: toTitleCase(campos[5].trim()),
-                    acordaosrelacionados: '',
-                    tipoprocesso: toTitleCase(campos[8].trim()),
-                    entidade: '',
-                    assunto: campos[2].trim(),
-                    sumario: enunciado,
-                    acordao: ''
-                };
-            }
         }
+
+        // ─── FORMATO ANTIGO (Jurisprudência Selecionada, vírgula) ──────────
+        const match = clean.match(/,\s*"[^"]+",\s*"[^"]+",\s*"[^"]+",\s*"\d{2}\/\d{2}\/\d{4}",/);
+        if (!match) return null;
+
+        const idx = match.index;
+        const enunciado = clean.substring(0, idx).trim().replace(/^"|"$/g, '').trim();
+        const remaining = clean.substring(idx + 1);
+
+        const regex = /"([^"]*)"/g;
+        const campos = [];
+        let m;
+        while ((m = regex.exec(remaining)) !== null) {
+            campos.push(m[1]);
+        }
+
+        if (campos.length >= 9) {
+            const acordao = campos[4].trim();
+            const tipo_proc = campos[8].trim().toUpperCase();
+            const isTargetType = TIPOS.some(t => tipo_proc.includes(t));
+            if (!isTargetType) return null;
+
+            return {
+                key: '',
+                tipo: '',
+                titulo: '',
+                numacordao: acordao,
+                anoacordao: '',
+                colegiado: extrairColegiado(acordao),
+                relator: toTitleCase(campos[5].trim()),
+                acordaosrelacionados: '',
+                tipoprocesso: toTitleCase(campos[8].trim()),
+                entidade: '',
+                assunto: campos[2].trim(),
+                sumario: enunciado,
+                acordao: ''
+            };
+        }
+
         return null;
     }
 

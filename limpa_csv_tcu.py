@@ -5,6 +5,11 @@ Converte CSV exportado do portal de jurisprudência do TCU em:
   - Markdown limpo (para análise no Claude)
   - JSON estruturado (para reuso futuro)
 
+Suporta TODOS os formatos de CSV do TCU:
+  - Formato bruto 2025 (Inteiro Teor com pipes "|" e 24+ colunas)
+  - Formato pré-processado (13 colunas com ";" ou "," exportadas pelo R/Excel)
+  - Formato antigo (Jurisprudência Selecionada com vírgula)
+
 Uso:
     python limpa_csv_tcu.py meu_arquivo.csv
 
@@ -22,6 +27,19 @@ from pathlib import Path
 # Aumentar o limite do tamanho do campo no parser CSV
 csv.field_size_limit(sys.maxsize)
 
+# Colunas padrão na saída (13 campos)
+STANDARD_COLUMNS = [
+    'KEY', 'TIPO', 'TITULO', 'NUMACORDAO', 'ANOACORDAO',
+    'COLEGIADO', 'RELATOR', 'ACORDAOSRELACIONADOS',
+    'TIPOPROCESSO', 'ENTIDADE', 'ASSUNTO', 'SUMARIO', 'ACORDAO'
+]
+
+TIPOS_FILTRO = [
+    'TOMADA DE CONTAS ESPECIAL', 'REPRESENTAÇÃO', 'DENÚNCIA',
+    'AUDITORIA', 'MONITORAMENTO', 'CONSULTA', 'RECURSO', 'LEVANTAMENTO'
+]
+
+
 def clean_html(text: str) -> str:
     """Remove tags HTML e normaliza os espaços e quebras de linha."""
     if not text:
@@ -32,17 +50,48 @@ def clean_html(text: str) -> str:
     text_clean = re.sub(r'\s+', ' ', text_clean).strip()
     return text_clean
 
+
+def detect_format(filepath: str, encoding: str):
+    """
+    Detecta o formato do CSV: delimitador e se as colunas padrão estão no cabeçalho.
+    Retorna (delimiter, has_standard_header).
+    """
+    with open(filepath, 'r', encoding=encoding) as f:
+        head = f.readline()
+
+    # Prioridade de detecção: | > ; > ,
+    if '|' in head:
+        delimiter = '|'
+    elif ';' in head:
+        delimiter = ';'
+    else:
+        delimiter = ','
+
+    # Verificar se o cabeçalho contém as colunas padrão do TCU
+    head_upper = head.upper()
+    has_standard = all(col in head_upper for col in ['KEY', 'NUMACORDAO', 'TIPOPROCESSO', 'ACORDAO'])
+
+    return delimiter, has_standard
+
+
+def is_target_type(tipo_processo: str, titulo: str = '') -> bool:
+    """Verifica se o tipo de processo ou título corresponde aos tipos desejados."""
+    tp = tipo_processo.upper()
+    tit = titulo.upper()
+    return any(t in tp or t in tit for t in TIPOS_FILTRO)
+
+
 def parse_tcu_csv(filepath: str):
     """
-    Parser robusto que detecta o delimitador e decodificação do CSV do TCU
-    e extrai apenas as 13 colunas especificadas.
-    """
-    tipos = [
-        'TOMADA DE CONTAS ESPECIAL', 'REPRESENTAÇÃO', 'DENÚNCIA',
-        'AUDITORIA', 'MONITORAMENTO', 'CONSULTA', 'RECURSO', 'LEVANTAMENTO'
-    ]
+    Parser robusto que detecta automaticamente o formato do CSV do TCU
+    e extrai as 13 colunas padronizadas.
 
-    # Detectar decodificação do arquivo (UTF-8 ou Latin-1)
+    Suporta 3 formatos:
+      1) Bruto 2025: pipe "|", 24+ colunas (índices fixos)
+      2) Pré-processado: ";" ou ",", 13 colunas com cabeçalho padrão (DictReader)
+      3) Antigo (Jurisprudência Selecionada): vírgula, formato livre com regex
+    """
+    # Detectar codificação do arquivo (UTF-8 ou Latin-1)
     encoding = 'utf-8'
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -50,26 +99,53 @@ def parse_tcu_csv(filepath: str):
     except UnicodeDecodeError:
         encoding = 'latin-1'
 
-    # Detectar delimitador (| ou ,) baseando-se no cabeçalho
-    with open(filepath, 'r', encoding=encoding) as f:
-        head = f.readline()
-        delimiter = '|' if '|' in head else ','
+    delimiter, has_standard = detect_format(filepath, encoding)
 
+    # ─── FORMATO PRÉ-PROCESSADO (cabeçalho com colunas padrão) ─────────────
+    # Cobre CSVs exportados pelo R (write_csv2 com ";"), Excel, ou
+    # qualquer ferramenta que mantenha os 13 nomes de coluna do TCU.
+    if has_standard:
+        with open(filepath, 'r', encoding=encoding) as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+
+            for row in reader:
+                tipo_proc = (row.get('TIPOPROCESSO') or '').strip()
+                titulo = (row.get('TITULO') or '').strip()
+
+                if not is_target_type(tipo_proc, titulo):
+                    continue
+
+                yield {
+                    'key':                  (row.get('KEY') or '').strip(),
+                    'tipo':                 (row.get('TIPO') or '').strip(),
+                    'titulo':               (row.get('TITULO') or '').strip(),
+                    'numacordao':           (row.get('NUMACORDAO') or '').strip(),
+                    'anoacordao':           (row.get('ANOACORDAO') or '').strip(),
+                    'colegiado':            (row.get('COLEGIADO') or '').strip(),
+                    'relator':              (row.get('RELATOR') or '').strip().title(),
+                    'acordaosrelacionados': (row.get('ACORDAOSRELACIONADOS') or '').strip(),
+                    'tipoprocesso':         tipo_proc.strip().title(),
+                    'entidade':             (row.get('ENTIDADE') or '').strip(),
+                    'assunto':              clean_html(row.get('ASSUNTO') or ''),
+                    'sumario':              clean_html(row.get('SUMARIO') or ''),
+                    'acordao':              clean_html(row.get('ACORDAO') or '')
+                }
+        return  # Encerrar — já processou tudo
+
+    # ─── FORMATO BRUTO 2025 (Inteiro Teor com Pipes, 24+ colunas) ──────────
     if delimiter == '|':
-        # --- NOVO FORMATO 2025 (Inteiro Teor com Pipes) ---
         with open(filepath, 'r', encoding=encoding) as f:
             reader = csv.reader(f, delimiter='|')
             next(reader, None)  # Pular cabeçalho
-            
+
             for row in reader:
                 if len(row) < 24:
                     continue
-                
+
                 tipo_processo = row[12].upper()
                 titulo = row[2].upper()
-                
-                is_target = any(t in tipo_processo or t in titulo for t in tipos)
-                if not is_target:
+
+                if not is_target_type(tipo_processo, titulo):
                     continue
 
                 yield {
@@ -87,8 +163,9 @@ def parse_tcu_csv(filepath: str):
                     'sumario':              clean_html(row[22]),
                     'acordao':              clean_html(row[23])
                 }
+
     else:
-        # --- FORMATO ANTIGO (Jurisprudência Selecionada com Vírgula) ---
+        # ─── FORMATO ANTIGO (Jurisprudência Selecionada com Vírgula) ────────
         with open(filepath, 'r', encoding=encoding) as f:
             next(f, None)  # Pular cabeçalho
             current = ''
@@ -97,14 +174,14 @@ def parse_tcu_csv(filepath: str):
                 if not line.strip():
                     continue
                 current = (current + '\n' + line) if current else line
-                
+
                 # Identifica fim do registro por tipo de processo na extremidade
-                ends = any(current.rstrip('"').rstrip().endswith(t) for t in tipos)
+                ends = any(current.rstrip('"').rstrip().endswith(t) for t in TIPOS_FILTRO)
                 if ends and current.lstrip().startswith('"'):
                     rec = current
                     current = ''
                     rec_clean = clean_html(rec)
-                    
+
                     # Localiza metadados com base na data (dd/mm/aaaa)
                     match = re.search(r',\s*"[^"]+",\s*"[^"]+",\s*"[^"]+",\s*"\d{2}\/\d{2}\/\d{4}",', rec_clean)
                     if not match:
@@ -112,12 +189,11 @@ def parse_tcu_csv(filepath: str):
 
                     enunciado = rec_clean[:match.start()].strip().strip('"').strip()
                     campos = re.findall(r'"([^"]*)"', rec_clean[match.start() + 1:])
-                    
+
                     if len(campos) >= 9:
                         acordao = campos[4].strip()
                         tipo_proc = campos[8].strip().upper()
-                        is_target = any(t in tipo_proc for t in tipos)
-                        if not is_target:
+                        if not any(t in tipo_proc for t in TIPOS_FILTRO):
                             continue
 
                         colegiado = 'Plenário'
@@ -137,10 +213,11 @@ def parse_tcu_csv(filepath: str):
                             'acordaosrelacionados': '',
                             'tipoprocesso':         campos[8].strip().title(),
                             'entidade':             '',
-                            'assunto':              campos[2].strip(), # Subtema vira assunto
-                            'sumario':              enunciado,         # Enunciado vira sumário
+                            'assunto':              campos[2].strip(),  # Subtema vira assunto
+                            'sumario':              enunciado,          # Enunciado vira sumário
                             'acordao':              ''
                         }
+
 
 def to_markdown_stream(records, out_file: Path, titulo: str):
     """Escreve o Markdown no arquivo de saída no formato solicitado."""
@@ -148,7 +225,7 @@ def to_markdown_stream(records, out_file: Path, titulo: str):
         f.write(f"# {titulo}\n\n")
         f.write(f"> Total de acórdãos: {len(records)}\n\n")
         f.write("---\n\n")
-        
+
         for r in records:
             f.write(f"## {r['titulo'] or 'Acórdão'}\n")
             f.write(f"**Chave (KEY):** {r['key'] or 'Não informado'}  \n")
@@ -167,6 +244,7 @@ def to_markdown_stream(records, out_file: Path, titulo: str):
                 f.write(f"\n**Acórdão (Decisão):**  \n{r['acordao']}\n")
             f.write("\n---\n\n")
 
+
 def main():
     if len(sys.argv) < 2:
         print("Uso: python limpa_csv_tcu.py <arquivo.csv>")
@@ -181,7 +259,7 @@ def main():
         sys.exit(1)
 
     print(f"📂 Lendo e processando: {input_path}")
-    
+
     out_md = input_path.with_suffix('.md')
     out_json = input_path.with_suffix('.json')
 
@@ -199,6 +277,7 @@ def main():
     print(f"🗂️  JSON:     {out_json}")
 
     print("\nPronto! Arquivos gerados com sucesso.")
+
 
 if __name__ == "__main__":
     main()
